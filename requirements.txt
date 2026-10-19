@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+httpx
+python-dotenv
+pydantic-settings
+loguru
+python-multipart
+sqlalchemy
+structlog

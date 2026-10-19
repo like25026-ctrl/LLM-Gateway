@@ -10,20 +10,21 @@ build/
 venv/
 .venv/
 
-# 本地数据库（你的 dev.db）
+# 数据库
 dev.db
 *.db
 
-# 环境变量 / 密钥
+# 环境变量（含所有 .env.xxx）
 .env
-*.env
+.env.*
+
+# IDE / 本地工具
+.trae/
+.vscode/
+.idea/
 
 # macOS
 .DS_Store
-
-# IDE
-.vscode/
-.idea/
 
 # 日志
 *.log
