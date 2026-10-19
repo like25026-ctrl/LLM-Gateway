@@ -1,4 +1,4 @@
-"""提示词模板服务：模板存储 / 版本管理 / 变量替换 / 版本引用
+"""提示词模板服务（prompts）：模板存储 / 版本管理 / 变量替换 / 版本引用
 
 - 存储：SQLite（SQLAlchemy），表 prompt_templates，(name, version) 唯一
 - 版本：同一 name 每次创建自增 version

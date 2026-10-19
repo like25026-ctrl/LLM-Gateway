@@ -1,4 +1,4 @@
-"""对话 API 路由
+"""API 路由（routes）
 
 端点：
 - GET  /models                 支持的模型列表
@@ -10,7 +10,7 @@
 - GET  /prompts/{name}/{version} 获取指定版本
 - POST /prompts/{name}/render  渲染模板（预览变量替换结果）
 
-协议差异与限流/重试/观测由 app.adapters 与 app.services.llm_service 负责，
+协议差异与限流/重试/观测由 services/upstream 与 services/gateway 负责，
 本层只做请求校验、模板渲染与参数透传。
 """
 
@@ -20,10 +20,10 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from app.core.errors import ErrorCode, LLMGatewayError
-from app.core.llm_config import SUPPORTED_MODELS
-from app.core.safety import check_sensitive_words
-from app.services import prompt_service
-from app.services.llm_service import chat_completion, chat_completion_stream
+from app.core.security import check_sensitive_words
+from app.services import prompts
+from app.services.gateway import chat_completion, chat_completion_stream
+from app.services.router import SUPPORTED_MODELS
 
 router = APIRouter(tags=["Agents"])
 
@@ -33,7 +33,7 @@ router = APIRouter(tags=["Agents"])
 def _validate_request(model: str, messages: List[Dict]) -> None:
     """统一请求校验：模型白名单 + 消息非空 + 敏感词
 
-    注：IP 限流与按模型限流已下沉到 llm_service，此处不再重复计数。
+    注：IP 限流与按模型限流已下沉到 gateway，此处不再重复计数。
     """
     if model not in SUPPORTED_MODELS:
         raise LLMGatewayError(
@@ -60,7 +60,7 @@ def _apply_prompt(body: dict, messages: List[Dict]) -> List[Dict]:
     name = prompt.get("name")
     if not name:
         raise LLMGatewayError(ErrorCode.INVALID_REQUEST, "prompt.name 不能为空")
-    rendered = prompt_service.render(name, prompt.get("variables") or {}, prompt.get("version"))
+    rendered = prompts.render(name, prompt.get("variables") or {}, prompt.get("version"))
     return [{"role": "system", "content": rendered}] + list(messages)
 
 
@@ -143,7 +143,7 @@ async def create_prompt(request: Request):
     template = body.get("template")
     if not name or not template:
         raise LLMGatewayError(ErrorCode.INVALID_REQUEST, "name 与 template 不能为空")
-    return prompt_service.create_version(
+    return prompts.create_version(
         name=name,
         template=template,
         variables=body.get("variables"),
@@ -154,24 +154,24 @@ async def create_prompt(request: Request):
 @router.get("/prompts")
 async def list_prompts():
     """列出所有模板版本"""
-    return {"prompts": prompt_service.list_templates()}
+    return {"prompts": prompts.list_templates()}
 
 
 @router.get("/prompts/{name}")
 async def get_prompt(name: str):
     """获取模板（默认最新版本）"""
-    return prompt_service.get_template(name)
+    return prompts.get_template(name)
 
 
 @router.get("/prompts/{name}/{version}")
 async def get_prompt_version(name: str, version: int):
     """获取指定版本模板"""
-    return prompt_service.get_template(name, version)
+    return prompts.get_template(name, version)
 
 
 @router.post("/prompts/{name}/render")
 async def render_prompt(name: str, request: Request):
     """渲染模板：预览变量替换结果"""
     body = await request.json()
-    rendered = prompt_service.render(name, body.get("variables") or {}, body.get("version"))
+    rendered = prompts.render(name, body.get("variables") or {}, body.get("version"))
     return {"name": name, "rendered": rendered}

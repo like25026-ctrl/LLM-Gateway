@@ -1,10 +1,10 @@
-"""LLM 编排服务：协议无关的调用编排
+"""LLM 网关编排（gateway）：协议无关的调用编排
 
-职责（全部与上游协议无关，协议差异交给 app.adapters）：
+职责（全部与上游协议无关，协议差异交给 services/upstream）：
 - 限流：IP 限流 + 按模型独立限流（超限抛 RATE_LIMITED / HTTP 429）
 - 重试：指数退避，最多 settings.RETRY_MAX_ATTEMPTS 次，仅对可重试错误生效
-- 可观测：Token 分类统计、总延迟、流式首 Token 延迟（TTFT）
-- 结构化输出校验
+- 结构化输出校验（services/structured_output）
+- 可观测（services/usage）：Token 分类统计、总延迟、流式首 Token 延迟（TTFT）
 - 输出归一化为 OpenAI Chat Completions 结构（非流式）/ SSE（流式）
 """
 
@@ -16,12 +16,13 @@ import time
 import httpx
 import structlog
 
-from app.adapters.base import StreamDelta, UnifiedRequest, Usage
-from app.adapters.registry import get_adapter
-from app.core.config import settings
+from app.config import settings
 from app.core.errors import ErrorCode, LLMGatewayError
-from app.core.llm_config import calculate_cost
-from app.services.rate_limit_service import check_model_rate_limit, check_rate_limit
+from app.core.rate_limit import check_model_rate_limit, check_rate_limit
+from app.services.router import get_adapter
+from app.services.structured_output import validate_structured
+from app.services.upstream import StreamDelta, UnifiedRequest, Usage
+from app.services.usage import log_call, merge_usage
 
 logger = structlog.get_logger()
 
@@ -65,45 +66,6 @@ def _upstream_status_error(status: int, body: str) -> LLMGatewayError:
     return LLMGatewayError(ErrorCode.INVALID_REQUEST, f"上游拒绝请求({status})", http_status=status, detail=body[:500], retryable=False)
 
 
-def _merge_usage(target: Usage, part: Usage) -> None:
-    """合并分片用量（流式中用量分散在多个事件里）"""
-    if part.prompt_tokens:
-        target.prompt_tokens = part.prompt_tokens
-    if part.completion_tokens:
-        target.completion_tokens = part.completion_tokens
-    if part.reasoning_tokens:
-        target.reasoning_tokens = part.reasoning_tokens
-    if part.cached_tokens:
-        target.cached_tokens = part.cached_tokens
-    if part.total_tokens:
-        target.total_tokens = part.total_tokens
-
-
-def _validate_structured(model: str, text: str, response_format: dict) -> str:
-    """结构化输出校验：返回合法 JSON 文本，否则抛 STRUCTURED_OUTPUT_FAILED"""
-    try:
-        data = json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        raise LLMGatewayError(
-            ErrorCode.STRUCTURED_OUTPUT_FAILED,
-            f"模型 {model} 未返回合法 JSON",
-            detail=text[:500],
-        )
-
-    if response_format.get("type") == "json_schema":
-        schema = (response_format.get("json_schema") or {}).get("schema") or {}
-        required = schema.get("required") or []
-        obj = data if isinstance(data, dict) else {}
-        missing = [k for k in required if k not in obj]
-        if missing:
-            raise LLMGatewayError(
-                ErrorCode.STRUCTURED_OUTPUT_FAILED,
-                f"结构化输出缺少必填字段: {missing}",
-                detail=text[:500],
-            )
-    return text
-
-
 def _to_chat_completion(model: str, unified, text: str) -> dict:
     """归一化为 OpenAI Chat Completions 结构"""
     usage = unified.usage
@@ -134,34 +96,6 @@ def _sse_chunk(model: str, content: str, reasoning: bool = False) -> str:
         "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
     }
     return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-
-
-def _log_completion(
-    model: str,
-    api_type: str,
-    stream: bool,
-    usage: Usage,
-    latency_ms: float,
-    first_token_ms: float | None = None,
-    error: str | None = None,
-) -> None:
-    """可观测性：Token 分类统计 + 延迟 + 首 Token 延迟"""
-    cost = calculate_cost(model, usage.prompt_tokens, usage.completion_tokens)
-    logger.info(
-        "llm_call_completed",
-        model=model,
-        api_type=api_type,
-        stream=stream,
-        prompt_tokens=usage.prompt_tokens,
-        completion_tokens=usage.completion_tokens,
-        reasoning_tokens=usage.reasoning_tokens,
-        cached_tokens=usage.cached_tokens,
-        total_tokens=usage.total_tokens or (usage.prompt_tokens + usage.completion_tokens),
-        cost_cny=cost,
-        latency_ms=round(latency_ms, 2),
-        first_token_latency_ms=round(first_token_ms, 2) if first_token_ms is not None else None,
-        error=error,
-    )
 
 
 async def chat_completion(
@@ -212,9 +146,9 @@ async def chat_completion(
     unified = adapter.parse_response(raw)
     text = unified.text
     if response_format is not None:
-        text = _validate_structured(model, text, response_format)
+        text = validate_structured(model, text, response_format)
 
-    _log_completion(model, adapter.api_type, False, unified.usage, latency_ms)
+    log_call(model, adapter.api_type, False, unified.usage, latency_ms)
     return _to_chat_completion(model, unified, text)
 
 
@@ -269,7 +203,7 @@ async def chat_completion_stream(
                     if delta is None:
                         continue
                     if delta.usage:
-                        _merge_usage(usage, delta.usage)
+                        merge_usage(usage, delta.usage)
                     if delta.reasoning:
                         if first_token_ms is None:
                             first_token_ms = (time.perf_counter() - start) * 1000
@@ -297,7 +231,7 @@ async def chat_completion_stream(
         err_payload = {"error": {"code": error_to_emit.code.value, "message": error_to_emit.message}}
         yield f"data: {json.dumps(err_payload, ensure_ascii=False)}\n\n"
 
-    _log_completion(
+    log_call(
         model,
         adapter.api_type,
         True,

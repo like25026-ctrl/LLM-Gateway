@@ -1,12 +1,10 @@
-import os
 import time
 from collections import defaultdict
 from threading import Lock
-from typing import Dict, List
 
 import structlog
 
-"""限流服务：基于滑动窗口的 IP 限流实现
+"""限流（rate_limit）：基于滑动窗口的 IP 限流 + 按模型独立限流
 
 生产环境建议替换为 Redis 实现，当前使用内存字典适合单实例部署。
 """
@@ -56,28 +54,7 @@ def check_rate_limit(client_ip: str, limit: int = 60, window: int = 60) -> bool:
     Returns:
         bool: True 表示允许请求，False 表示触发限流
     """
-    now = time.time()
-    cutoff = now - window
-
-    with _lock:
-        # 清理过期记录
-        timestamps = _request_log[client_ip]
-        _request_log[client_ip] = [ts for ts in timestamps if ts > cutoff]
-
-        # 检查是否超限
-        if len(_request_log[client_ip]) >= limit:
-            logger.warning(
-                "rate_limit_exceeded",
-                client_ip=client_ip,
-                current_count=len(_request_log[client_ip]),
-                limit=limit,
-                window=window,
-            )
-            return False
-
-        # 记录本次请求
-        _request_log[client_ip].append(now)
-        return True
+    return _sliding_window_allow(client_ip, _request_log, limit, window)
 
 
 def check_model_rate_limit(model_id: str, limit: int = 60, window: int = 60) -> bool:
@@ -126,4 +103,3 @@ def reset_rate_limit(client_ip: str | None = None):
         else:
             _request_log.clear()
     logger.info("rate_limit_reset", client_ip=client_ip or "all")
-

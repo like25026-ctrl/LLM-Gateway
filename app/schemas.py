@@ -28,7 +28,7 @@ class ChatRequest(BaseModel):
     @field_validator("model")
     @classmethod
     def validate_model(cls, v: str) -> str:
-        from app.core.llm_config import SUPPORTED_MODELS
+        from app.services.router import SUPPORTED_MODELS
         if v not in SUPPORTED_MODELS:
             raise ValueError(f"不支持的模型: {v}，支持的模型: {list(SUPPORTED_MODELS.keys())}")
         return v

@@ -4,8 +4,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import text
 from starlette import status
 
-from app.database import engine, get_db
-from app.core.config import settings
+from app.database import get_db
+from app.config import settings
 
 router = APIRouter(prefix="/health", tags=["Health"])
 _start_time = time.time()

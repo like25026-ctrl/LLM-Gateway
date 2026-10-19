@@ -2,7 +2,7 @@ import structlog
 
 
 from structlog.stdlib import add_log_level
-from app.core.config import settings
+from app.config import settings
 
 """
 结构化日志配置 - structlog

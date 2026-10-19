@@ -96,5 +96,5 @@ class Settings(BaseSettings):
     def is_dev(self) -> bool:
         return self.ENVIRONMENT == "development"
 
-# 全局单例，其他模块直接 from app.core.config import settings
+# 全局单例，其他模块直接 from app.config import settings
 settings = Settings()

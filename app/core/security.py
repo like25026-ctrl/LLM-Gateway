@@ -1,7 +1,7 @@
-# app/core/safety.py
+# app/core/security.py
 
 """
-敏感词过滤工具
+敏感词过滤工具（安全层）
 - SENSITIVE_WORDS：敏感词库（后续可升级为读取外部数据库/文件）
 - check_sensitive_words：检查文本是否包含敏感词
 - filter_sensitive_words：过滤敏感词，替换为 ***

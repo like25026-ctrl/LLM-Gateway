@@ -11,12 +11,11 @@ from starlette.staticfiles import StaticFiles
 
 from app.core.logging_config import setup_logging
 from app.core.errors import LLMGatewayError, llm_gateway_error_handler
-from app.api import health, agents
+from app.api import health, routes
 import app.models  # noqa: F401  注册 ORM 模型（含 PromptTemplate），供 create_all 建表
 from app.database import Base, engine
 from app.middleware import RequestIDMiddleware, LoggingMiddleware
-from app.services import check_rate_limit, call_deepseek_nonstream
-from app.core.config import settings
+from app.config import settings
 
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -64,7 +63,7 @@ def create_app() -> FastAPI:
 
     # register Routers
     app.include_router(health.router)
-    app.include_router(agents.router,prefix="/api/v1")
+    app.include_router(routes.router, prefix="/api/v1")
 
     # 挂载静态前端
     index_path  = os.path.join(os.path.dirname(__file__), "static", "index.html")
