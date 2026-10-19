@@ -1,0 +1,12 @@
+version: '3.8'
+services:
+  app:
+    build: .
+    ports:
+      - "80:8000"
+    environment:
+      - ENV_FILE=.env.production
+    deploy:
+      resources:
+        limits:
+          memory: 1G
