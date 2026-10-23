@@ -7,3 +7,6 @@ loguru
 python-multipart
 sqlalchemy
 structlog
+pyyaml
+jsonschema
+tiktoken

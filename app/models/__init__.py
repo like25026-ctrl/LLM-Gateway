@@ -5,7 +5,7 @@
 """
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, Float, Boolean, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Text, DateTime, Float, Boolean, JSON, UniqueConstraint
 from app.database import Base
 
 
@@ -67,3 +67,40 @@ class PromptTemplate(Base):
 
     def __repr__(self):
         return f"<PromptTemplate name={self.name} v{self.version}>"
+
+
+class UsageEventModel(Base):
+    """LLM 调用记录表：每次网关调用（成功 / 失败 / 限流 / 未知模型）持久化一条事件
+
+    对应 services/usage.UsageEvent 数据类；metadata 列因与 SQLAlchemy
+    Base.metadata 冲突，属性名为 event_metadata（列名仍为 metadata）。
+    """
+    __tablename__ = "usage_events"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    request_id = Column(String(64), index=True, default="", comment="请求 ID（X-Request-ID）")
+    api_key_hash = Column(String(64), default="", comment="上游 API Key 哈希（sha256 前 16 位）")
+    endpoint = Column(String(128), default="", comment="请求端点，如 /api/v1/chat")
+    requested_model = Column(String(64), index=True, nullable=False, comment="请求的模型 ID")
+    provider = Column(String(32), nullable=True, comment="上游提供方")
+    upstream_model = Column(String(64), nullable=True, comment="上游实际使用的模型名")
+    stream = Column(Boolean, default=False, comment="是否流式调用")
+    status = Column(String(16), default="success", index=True, comment="success / error")
+    status_code = Column(Integer, default=200, comment="HTTP 状态码")
+    input_tokens = Column(Integer, default=0, comment="输入 tokens")
+    output_tokens = Column(Integer, default=0, comment="输出 tokens")
+    cached_tokens = Column(Integer, default=0, comment="缓存命中 tokens")
+    cost_usd = Column(Float, default=0.0, comment="费用（按模型定价表计算；当前定价单位为元/CNY）")
+    latency_ms = Column(Float, default=0.0, comment="总延迟 ms")
+    first_token_ms = Column(Float, nullable=True, comment="首 Token 延迟 ms（流式 TTFT）")
+    retries = Column(Integer, default=0, comment="上游重试次数")
+    fallbacks = Column(Integer, default=0, comment="降级次数（预留）")
+    error_type = Column(String(64), nullable=True, comment="统一错误码，如 upstream_timeout")
+    error_message = Column(String(512), nullable=True, comment="错误信息")
+    prompt_id = Column(String(128), nullable=True, comment="引用的提示词模板名")
+    prompt_version = Column(Integer, nullable=True, comment="引用的模板版本")
+    event_metadata = Column("metadata", JSON, nullable=True, comment="附加信息（JSON）")
+    created_at = Column(DateTime, default=datetime.utcnow, index=True, comment="创建时间")
+
+    def __repr__(self):
+        return f"<UsageEvent id={self.id} model={self.requested_model} status={self.status}>"

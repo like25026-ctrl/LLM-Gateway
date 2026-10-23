@@ -20,6 +20,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 from app.config import settings
+from app.services.structured_output import content_from_response, json_schema_instruction
 
 
 @dataclass
@@ -68,10 +69,15 @@ class StreamDelta:
 
 
 class BaseAdapter(ABC):
-    """协议适配器抽象基类"""
+    """协议适配器抽象基类
+
+    config 为路由配置（services/router.Route.as_adapter_config()）：
+    {model, base_url, api_key, timeout_seconds, endpoint}
+    鉴权/超时/端点随路由走，适配器不再依赖全局 settings。
+    """
 
     api_type: str = ""
-    endpoint_path: str = ""
+    _DEFAULT_ENDPOINT: str = ""
     # 是否原生支持结构化输出（False 表示需要提示词注入模拟）
     supports_structured_output: bool = True
 
@@ -88,11 +94,25 @@ class BaseAdapter(ABC):
     def base_url(self) -> str:
         return self.config["base_url"]
 
+    @property
+    def api_key(self) -> str:
+        """路由级鉴权 Key（未配置时回退全局 settings）"""
+        return self.config.get("api_key") or settings.DEEPSEEK_API_KEY
+
+    @property
+    def timeout_seconds(self) -> float:
+        return float(self.config.get("timeout_seconds") or 120.0)
+
+    @property
+    def endpoint_path(self) -> str:
+        """上游端点路径（相对 base_url），可被路由配置覆盖"""
+        return self.config.get("endpoint") or self._DEFAULT_ENDPOINT
+
     def headers(self) -> dict:
         """默认鉴权头：OpenAI 风格 Bearer"""
         return {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}",
+            "Authorization": f"Bearer {self.api_key}",
         }
 
     @staticmethod
@@ -117,10 +137,14 @@ class BaseAdapter(ABC):
 
 
 class ChatAdapter(BaseAdapter):
-    """OpenAI Chat Completions 适配器（deepseek-chat / deepseek-reasoner）"""
+    """OpenAI Chat Completions 适配器（deepseek-chat / deepseek-reasoner）
+
+    结构化输出：json_object 原生透传；json_schema 上游不支持，
+    降级为「注入 schema 指令 + response_format=json_object」，由网关做 jsonschema 校验。
+    """
 
     api_type = "chat"
-    endpoint_path = "/chat/completions"
+    _DEFAULT_ENDPOINT = "/v1/chat/completions"
     supports_structured_output = True
 
     def build_payload(self, req: UnifiedRequest) -> dict:
@@ -134,14 +158,21 @@ class ChatAdapter(BaseAdapter):
         if req.max_tokens is not None:
             payload["max_tokens"] = req.max_tokens
         if req.response_format is not None:
-            payload["response_format"] = req.response_format
+            fmt_type = req.response_format.get("type")
+            if fmt_type == "json_schema":
+                payload["messages"] = [
+                    {"role": "system", "content": json_schema_instruction(req.response_format["schema"])}
+                ] + list(req.messages)
+                payload["response_format"] = {"type": "json_object"}
+            else:
+                payload["response_format"] = req.response_format
         if req.user_id:
             payload["user_id"] = req.user_id
         return payload
 
     def parse_response(self, raw: dict) -> UnifiedResponse:
         choice = (raw.get("choices") or [{}])[0]
-        text = (choice.get("message") or {}).get("content") or ""
+        text = content_from_response(self.api_type, raw)
         u = raw.get("usage") or {}
         usage = Usage(
             prompt_tokens=u.get("prompt_tokens", 0),
@@ -192,7 +223,7 @@ class ResponsesAdapter(BaseAdapter):
     """
 
     api_type = "responses"
-    endpoint_path = "/responses"
+    _DEFAULT_ENDPOINT = "/responses"
     supports_structured_output = True
 
     def build_payload(self, req: UnifiedRequest) -> dict:
@@ -225,27 +256,24 @@ class ResponsesAdapter(BaseAdapter):
 
     @staticmethod
     def _map_format(response_format: dict) -> dict:
-        """OpenAI 风格 response_format -> Responses API text.format"""
+        """规范形 response_format -> Responses API text.format
+
+        规范形由 structured_output.schema_from_request 生成：
+        {"type": "json_schema", "name": ..., "schema": {...}}
+        """
         fmt_type = response_format.get("type")
         if fmt_type == "json_object":
             return {"type": "json_object"}
         if fmt_type == "json_schema":
-            schema = response_format.get("json_schema") or {}
             return {
                 "type": "json_schema",
-                "name": schema.get("name", "response"),
-                "schema": schema.get("schema", {}),
+                "name": response_format.get("name", "response"),
+                "schema": response_format.get("schema", {}),
             }
         return {"type": "text"}
 
     def parse_response(self, raw: dict) -> UnifiedResponse:
-        texts: list[str] = []
-        for item in raw.get("output") or []:
-            if item.get("type") != "message":
-                continue
-            for part in item.get("content") or []:
-                if part.get("type") == "output_text":
-                    texts.append(part.get("text", ""))
+        text = content_from_response(self.api_type, raw)
 
         u = raw.get("usage") or {}
         usage = Usage(
@@ -256,7 +284,7 @@ class ResponsesAdapter(BaseAdapter):
             total_tokens=u.get("total_tokens", 0),
         )
         return UnifiedResponse(
-            text="".join(texts),
+            text=text,
             finish_reason=raw.get("status"),
             usage=usage,
             raw=raw,
@@ -298,15 +326,15 @@ class AnthropicAdapter(BaseAdapter):
     """
 
     api_type = "anthropic"
-    endpoint_path = "/v1/messages"
+    _DEFAULT_ENDPOINT = "/anthropic/v1/messages"
     supports_structured_output = False  # 原生不支持，采用提示词注入模拟
 
     def headers(self) -> dict:
         return {
             "Content-Type": "application/json",
-            "x-api-key": settings.DEEPSEEK_API_KEY,
+            "x-api-key": self.api_key,
             "anthropic-version": "2023-06-01",
-            "Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}",
+            "Authorization": f"Bearer {self.api_key}",
         }
 
     def build_payload(self, req: UnifiedRequest) -> dict:
@@ -340,22 +368,15 @@ class AnthropicAdapter(BaseAdapter):
 
     @staticmethod
     def _structured_hint(response_format: dict) -> str:
-        fmt_type = response_format.get("type")
-        base = (
+        if response_format.get("type") == "json_schema":
+            return json_schema_instruction(response_format["schema"])
+        return (
             "You must respond with a single valid JSON value and nothing else. "
             "Do not wrap it in markdown code fences or add any explanation."
         )
-        if fmt_type == "json_schema":
-            schema = response_format.get("json_schema") or {}
-            return base + " The JSON must conform to this schema: " + str(schema.get("schema", {}))
-        return base
 
     def parse_response(self, raw: dict) -> UnifiedResponse:
-        texts = [
-            block.get("text", "")
-            for block in (raw.get("content") or [])
-            if block.get("type") == "text"
-        ]
+        text = content_from_response(self.api_type, raw)
         u = raw.get("usage") or {}
         prompt_tokens = u.get("input_tokens", 0)
         completion_tokens = u.get("output_tokens", 0)
@@ -365,7 +386,7 @@ class AnthropicAdapter(BaseAdapter):
             total_tokens=prompt_tokens + completion_tokens,
         )
         return UnifiedResponse(
-            text="".join(texts),
+            text=text,
             finish_reason=raw.get("stop_reason"),
             usage=usage,
             raw=raw,

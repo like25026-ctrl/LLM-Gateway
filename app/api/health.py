@@ -8,6 +8,8 @@ from app.database import get_db
 from app.config import settings
 
 router = APIRouter(prefix="/health", tags=["Health"])
+# 运维别名（无前缀）：/healthz、/readyz，兼容通用编排平台探针约定
+ops_router = APIRouter(tags=["Health"])
 _start_time = time.time()
 
 @router.get("/live", status_code=status.HTTP_200_OK, include_in_schema=False)
@@ -17,6 +19,20 @@ async def health_live():
 
 @router.get("/ready", status_code=status.HTTP_200_OK, include_in_schema=False)
 async def health_ready(db = Depends(get_db)):
+    try:
+        db.execute(text("SELECT 1"))
+        return {"status": "ready", "database": "connected"}
+    except Exception:
+        return {"status": "not ready", "database": "disconnected"}
+
+@ops_router.get("/healthz", status_code=status.HTTP_200_OK, include_in_schema=False)
+async def healthz():
+    """存活探针别名：/healthz（等价 /health/live）"""
+    return {"status": "alive"}
+
+@ops_router.get("/readyz", status_code=status.HTTP_200_OK, include_in_schema=False)
+async def readyz(db = Depends(get_db)):
+    """就绪探针别名：/readyz（等价 /health/ready）"""
     try:
         db.execute(text("SELECT 1"))
         return {"status": "ready", "database": "connected"}

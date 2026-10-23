@@ -1,0 +1,112 @@
+# ============================================================
+# LLM Gateway 配置文件
+# - ${VAR} / ${VAR:-default} 支持环境变量插值（.env 与系统环境变量均可）
+# - 删除本文件时使用内置默认值（app/core/gateway_config.py）
+# - 模型/供应商/价格调整只改这里，无需动代码
+# ============================================================
+
+# 调用方鉴权：留空（或仅 ${GATEWAY_API_KEY:-} 未设置）表示开发模式不校验；
+# 配置后所有 /v1、/api/v1 与 /admin 接口都需 Authorization: Bearer <key>
+api_keys:
+  - ${GATEWAY_API_KEY:-}
+
+# 韧性：上游重试（指数退避 + 最大延迟封顶）
+retry:
+  max_attempts: 3
+  base_delay_seconds: 0.5
+  max_delay_seconds: 4.0
+  retry_statuses: [408, 429, 500, 502, 503, 504]
+
+# 韧性：按路由熔断（连续失败 N 次后冷却 M 秒，冷却结束半开探测）
+circuit_breaker:
+  enabled: true
+  failure_threshold: 5
+  cooldown_seconds: 30
+
+# 限流开关（IP / 模型阈值在 app/config.py：RATE_LIMIT / MODEL_RATE_LIMIT）
+rate_limit:
+  enabled: true
+
+# 结构化输出校验失败后的自修复次数（0 = 不修复直接报错）
+structured_output_retries: 1
+
+# 上游提供方：endpoint / 鉴权 / 超时与模型解耦，新增供应商只加一段
+providers:
+  deepseek:
+    base_url: https://api.deepseek.com
+    api_key: ${DEEPSEEK_API_KEY:-}
+    timeout_seconds: 120
+
+# 模型注册表：逻辑模型 -> 路由列表
+# strategy: priority（按序故障转移）| weighted_round_robin（加权轮询，失败仍可转移）
+# type: chat | responses | anthropic（决定适配器与默认端点路径）
+# api:  chat | responses | both（声明该路由可服务的入口协议；缺省按 type 推导）
+#       —— 仅 /v1/responses 入口按此声明校验，避免把 chat 供应商伪装成 Responses API
+# 路由可覆盖: base_url / endpoint / weight
+models:
+  deepseek-chat:
+    display_name: DeepSeek Chat (V3)
+    strategy: priority
+    routes:
+      - provider: deepseek
+        type: chat
+        api: chat
+        model: deepseek-chat
+
+  deepseek-reasoner:
+    display_name: DeepSeek Reasoner (R1)
+    strategy: priority
+    routes:
+      - provider: deepseek
+        type: chat
+        api: chat
+        model: deepseek-reasoner
+
+  deepseek-v4-pro:
+    display_name: DeepSeek V4 Pro
+    strategy: priority
+    routes:
+      - provider: deepseek
+        type: responses
+        api: responses
+        model: deepseek-v4-pro
+
+  deepseek-flash:
+    display_name: DeepSeek V4 Flash
+    strategy: priority
+    routes:
+      - provider: deepseek
+        type: anthropic
+        api: chat
+        model: deepseek-flash
+
+  # 示例：别名 + 故障转移（第一路由不可达时自动切到备用路由）
+  smart:
+    display_name: Smart (failover demo)
+    strategy: priority
+    routes:
+      - provider: deepseek
+        type: chat
+        api: chat
+        model: deepseek-chat
+        base_url: http://127.0.0.1:9 # 不可达地址，仅演示 failover
+      - provider: deepseek
+        type: chat
+        api: chat
+        model: deepseek-chat
+
+# 单位：元 / 1M tokens（按上游模型名计价；cached_input 未配置时按 input 价计）
+pricing:
+  deepseek-chat:
+    input_per_million: 1.0
+    output_per_million: 2.0
+    cached_input_per_million: 0.2
+  deepseek-reasoner:
+    input_per_million: 1.0
+    output_per_million: 2.0
+  deepseek-v4-pro:
+    input_per_million: 9.0
+    output_per_million: 27.0
+  deepseek-flash:
+    input_per_million: 2.0
+    output_per_million: 8.0

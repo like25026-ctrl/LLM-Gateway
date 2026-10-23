@@ -1,17 +1,19 @@
+import asyncio
 import os
 import uuid
 from contextlib import asynccontextmanager
 
 import structlog
 from contextvars import ContextVar
-from fastapi import FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import HTMLResponse
 from starlette.staticfiles import StaticFiles
 
 from app.core.logging_config import setup_logging
 from app.core.errors import LLMGatewayError, llm_gateway_error_handler
-from app.api import health, routes
+from app.core.auth import require_api_key
+from app.api import health, openai_compat, routes
 import app.models  # noqa: F401  注册 ORM 模型（含 PromptTemplate），供 create_all 建表
 from app.database import Base, engine
 from app.middleware import RequestIDMiddleware, LoggingMiddleware
@@ -25,8 +27,8 @@ logger = structlog.get_logger()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging(settings.ENVIRONMENT)
-    # 创建数据库表
-    Base.metadata.create_all(bind=engine)
+    # 创建数据库表（同步 DDL 卸载到工作线程，不阻塞事件循环）
+    await asyncio.to_thread(Base.metadata.create_all, bind=engine)
     yield
 
 
@@ -62,8 +64,13 @@ def create_app() -> FastAPI:
     app.add_exception_handler(LLMGatewayError, llm_gateway_error_handler)
 
     # register Routers
+    # 探针不加鉴权；兼容层 /v1、业务层 /api/v1 与管理接口按需 Bearer 鉴权
+    # （require_api_key 在未配置 api_keys 时自动放行，不影响开发模式与内置 Web 界面）
     app.include_router(health.router)
-    app.include_router(routes.router, prefix="/api/v1")
+    app.include_router(health.ops_router)
+    app.include_router(openai_compat.router, prefix="/v1", dependencies=[Depends(require_api_key)])
+    app.include_router(routes.router, prefix="/api/v1", dependencies=[Depends(require_api_key)])
+    app.include_router(routes.admin_router, dependencies=[Depends(require_api_key)])
 
     # 挂载静态前端
     index_path  = os.path.join(os.path.dirname(__file__), "static", "index.html")
